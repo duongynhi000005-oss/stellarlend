@@ -146,6 +146,10 @@ pub enum BorrowDataKey {
     BorrowUserCollaterals(Address),
     /// Per-asset liquidation incentive override in basis points
     AssetLiquidationIncentiveBps(Address),
+    /// Per-asset borrow cap configured by the admin
+    AssetBorrowCap(Address),
+    /// Aggregate borrowed principal tracked per asset
+    AssetTotalDebt(Address),
 }
 
 /// Dynamic stablecoin configuration.
@@ -440,6 +444,17 @@ fn borrow_inner(
         return Err(BorrowError::DebtCeilingReached);
     }
 
+    let asset_debt = get_asset_total_debt(env, &asset);
+    let new_asset_debt = asset_debt
+        .checked_add(amount)
+        .ok_or(BorrowError::Overflow)?;
+
+    if let Some(asset_cap) = get_asset_borrow_cap(env, &asset) {
+        if new_asset_debt > asset_cap {
+            return Err(BorrowError::DebtCeilingReached);
+        }
+    }
+
     crate::utilization_breaker::check_borrow(env, amount, new_total, limits.debt_ceiling)?;
 
     let mut debt_position = get_debt_position(env, &user, Some(&asset), rate_type);
@@ -464,6 +479,7 @@ fn borrow_inner(
     save_debt_position(env, &user, &debt_position);
     add_collateral(env, &user, &collateral_asset, collateral_amount)?;
     set_total_debt(env, new_total);
+    set_asset_total_debt(env, &asset, new_asset_debt);
 
     // Lazy pool state (#1046): the borrow-index snapshot is only materialised
     // by the pool's first borrow, never at pool creation.
@@ -578,6 +594,7 @@ pub fn repay_with_rate(
             .checked_sub(remaining_repayment)
             .ok_or(BorrowError::Overflow)?;
         set_total_debt(env, new_total);
+        decrease_asset_total_debt(env, &asset, remaining_repayment);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
     }
 
@@ -987,6 +1004,71 @@ pub(crate) fn set_total_debt(env: &Env, amount: i128) {
         .set(&BorrowDataKey::BorrowTotalDebt, &amount);
 }
 
+/// Configure (`Some(cap)`) or clear (`None`) the borrow cap for a specific asset (admin only).
+pub fn set_asset_borrow_cap(
+    env: &Env,
+    admin: &Address,
+    asset: &Address,
+    cap: Option<i128>,
+) -> Result<(), BorrowError> {
+    require_admin(env, admin)?;
+
+    let previous_cap = get_asset_borrow_cap(env, asset).unwrap_or(0);
+    let key = BorrowDataKey::AssetBorrowCap(asset.clone());
+
+    let new_cap = match cap {
+        Some(value) => {
+            if value <= 0 {
+                return Err(BorrowError::InvalidAmount);
+            }
+            env.storage().persistent().set(&key, &value);
+            value
+        }
+        None => {
+            env.storage().persistent().remove(&key);
+            0
+        }
+    };
+
+    crate::events::BorrowCapUpdatedEvent {
+        admin: admin.clone(),
+        asset: asset.clone(),
+        previous_cap,
+        new_cap,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+
+    Ok(())
+}
+
+/// Read the configured borrow cap for `asset`, or `None` if uncapped at the asset level.
+pub fn get_asset_borrow_cap(env: &Env, asset: &Address) -> Option<i128> {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::AssetBorrowCap(asset.clone()))
+}
+
+/// Read the aggregate borrowed principal currently outstanding for `asset`.
+pub fn get_asset_total_debt(env: &Env, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::AssetTotalDebt(asset.clone()))
+        .unwrap_or(0)
+}
+
+pub(crate) fn set_asset_total_debt(env: &Env, asset: &Address, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::AssetTotalDebt(asset.clone()), &amount);
+}
+
+pub(crate) fn decrease_asset_total_debt(env: &Env, asset: &Address, amount: i128) {
+    let current = get_asset_total_debt(env, asset);
+    let updated = current.checked_sub(amount).unwrap_or(0).max(0);
+    set_asset_total_debt(env, asset, updated);
+}
+
 /// Zero out a borrow position whose remaining principal is below the configured minimum borrow
 /// amount (economically negligible "dust"), crediting the swept amount back to the protocol's
 /// total debt. Returns the swept amount, or `0` when there is nothing to sweep.
@@ -1018,6 +1100,7 @@ pub fn sweep_debt_dust(env: &Env, user: Address, asset: Address) -> Result<i128,
         let total_debt = get_total_debt(env);
         let new_total = total_debt.checked_sub(swept).ok_or(BorrowError::Overflow)?;
         set_total_debt(env, new_total);
+        decrease_asset_total_debt(env, &asset, swept);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
 
         return Ok(swept);

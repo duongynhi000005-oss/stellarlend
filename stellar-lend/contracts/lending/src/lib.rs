@@ -55,10 +55,10 @@ use borrow::{
     set_liquidation_threshold_bps as set_liquidation_threshold_logic,
     set_oracle as set_oracle_logic, set_variable_borrow_rate_bps as set_variable_borrow_rate_logic,
     sweep_debt_dust as borrow_sweep_debt_dust, switch_rate_type as switch_rate_type_logic,
-    BorrowCollateral, DebtPosition, RateType,
+    BorrowCollateral, DebtPosition,
 };
 pub use borrow::{
-    BorrowError, DEFAULT_LIQUIDATION_INCENTIVE_BPS, MAX_COLLATERAL_ASSETS,
+    BorrowError, RateType, DEFAULT_LIQUIDATION_INCENTIVE_BPS, MAX_COLLATERAL_ASSETS,
     MAX_LIQUIDATION_INCENTIVE_BPS, MIN_LIQUIDATION_INCENTIVE_BPS,
 };
 use calldata::{CalldataError, CompressedOp};
@@ -529,6 +529,26 @@ impl LendingContract {
     /// its override if set, otherwise the global incentive.
     pub fn get_asset_liq_incentive_bps(env: Env, collateral_asset: Address) -> i128 {
         borrow::get_asset_liquidation_incentive_bps(&env, &collateral_asset)
+    }
+
+    /// Configure (`Some(cap)`) or clear (`None`) the borrow cap for a specific asset (admin only).
+    pub fn set_asset_borrow_cap(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        cap: Option<i128>,
+    ) -> Result<(), BorrowError> {
+        borrow::set_asset_borrow_cap(&env, &admin, &asset, cap)
+    }
+
+    /// Read the configured per-asset borrow cap for `asset` (`None` when uncapped at the asset level).
+    pub fn get_asset_borrow_cap(env: Env, asset: Address) -> Option<i128> {
+        borrow::get_asset_borrow_cap(&env, &asset)
+    }
+
+    /// Read the aggregate borrowed principal currently outstanding for `asset`.
+    pub fn get_asset_total_debt(env: Env, asset: Address) -> i128 {
+        borrow::get_asset_total_debt(&env, &asset)
     }
 
     /// Current interest rate model parameters.

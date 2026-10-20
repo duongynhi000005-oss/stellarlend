@@ -52,6 +52,18 @@ pub struct LiqIncentiveUpdatedEvent {
     pub timestamp: u64,
 }
 
+/// Per-asset borrow cap updated by admin (`new_cap` is `0` when the per-asset cap is cleared).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct BorrowCapUpdatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub asset: Address,
+    pub previous_cap: i128,
+    pub new_cap: i128,
+    pub timestamp: u64,
+}
+
 /// Interest rate model parameters changed (admin or governance action).
 #[contractevent]
 #[derive(Clone, Debug)]
