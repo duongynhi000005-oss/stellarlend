@@ -73,21 +73,21 @@ pub use deposit::{DepositCollateral, DepositError};
 use deposit_batch::deposit_batch as deposit_batch_logic;
 pub use deposit_batch::{BatchDepositResult, DepositRequest, MAX_BATCH_DEPOSITS};
 use flash_loan::{
-    flash_loan as flash_loan_logic, set_flash_loan_fee_bps as set_flash_loan_fee_logic,
-    get_flash_loan_fee_bps as get_flash_loan_fee_bps_logic,
-    set_flash_loan_security_config as set_flash_loan_security_config_logic,
+    flash_loan as flash_loan_logic, get_flash_loan_fee_bps as get_flash_loan_fee_bps_logic,
     get_flash_loan_security_config as get_flash_loan_security_config_logic,
     get_flash_loan_security_snapshot as get_flash_loan_security_snapshot_logic,
     is_asset_flash_loan_active as is_asset_flash_loan_active_logic,
-    FlashLoanError, FlashLoanSecurityConfig, FlashLoanSecuritySnapshot,
+    set_flash_loan_fee_bps as set_flash_loan_fee_logic,
+    set_flash_loan_security_config as set_flash_loan_security_config_logic, FlashLoanError,
+    FlashLoanSecurityConfig, FlashLoanSecuritySnapshot,
 };
 pub use interest_rate::{InterestRateConfig, InterestRateConfigUpdate};
 use lazy::{LazyField, PoolStateView};
 pub use liquidate::LiquidationResult;
-use pause::{is_paused, set_pause as set_pause_logic};
 /// Re-exported so integrators (and the `tests/` suites) can build `set_pause`
 /// and `guardian_pause` arguments.
 pub use pause::PauseType;
+use pause::{is_paused, set_pause as set_pause_logic};
 use reentrancy::ReentrancyGuard;
 use token_receiver::receive as receive_logic;
 use utilization_breaker::{
@@ -102,13 +102,14 @@ use views::{
     get_user_position as view_user_position, UserPositionSummary,
 };
 
+pub use withdraw::WithdrawError;
 use withdraw::{
     emergency_withdraw as emergency_withdraw_logic,
     get_emergency_stats as get_emergency_stats_logic,
     initialize_withdraw_settings as initialize_withdraw_logic,
     set_emergency_withdraw_limit as set_emergency_withdraw_limit_logic,
     set_withdraw_paused as set_withdraw_paused_logic,
-    sweep_deposit_dust as sweep_deposit_dust_logic, withdraw as withdraw_logic, WithdrawError,
+    sweep_deposit_dust as sweep_deposit_dust_logic, withdraw as withdraw_logic,
 };
 mod data_store;
 mod insurance;
@@ -144,6 +145,8 @@ mod insurance_test;
 #[cfg(test)]
 mod invariant_prop_test;
 #[cfg(test)]
+mod liquidation_boundary_test;
+#[cfg(test)]
 mod math_safety_test;
 #[cfg(test)]
 mod pause_test;
@@ -159,8 +162,6 @@ mod utilization_breaker_test;
 mod views_test;
 #[cfg(test)]
 mod withdraw_test;
-#[cfg(test)]
-mod liquidation_boundary_test;
 
 #[contract]
 pub struct LendingContract;
@@ -199,10 +200,7 @@ impl LendingContract {
 
     /// Claim vested tokens to the authorizing supplier, including after withdrawal
     /// or disabling new allocations. A repeated claim returns zero.
-    pub fn claim_supplier_rewards(
-        env: Env,
-        user: Address,
-    ) -> Result<i128, SupplierRewardsError> {
+    pub fn claim_supplier_rewards(env: Env, user: Address) -> Result<i128, SupplierRewardsError> {
         supplier_rewards::claim(&env, user)
     }
 
@@ -339,11 +337,7 @@ impl LendingContract {
     /// This is the emergency control surface. It is restricted to the
     /// configured admin and delegates to the same guarded pause storage used
     /// by the granular operation controls.
-    pub fn emergency_pause(
-        env: Env,
-        admin: Address,
-        paused: bool,
-    ) -> Result<(), BorrowError> {
+    pub fn emergency_pause(env: Env, admin: Address, paused: bool) -> Result<(), BorrowError> {
         Self::set_pause(env, admin, PauseType::All, paused)
     }
 

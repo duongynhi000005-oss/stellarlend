@@ -17,7 +17,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SL="${ROOT}/stellar-lend"
-SUITES=(${SUITES:-fuzz_invariants user_journeys event_topics})
+SUITES=(${SUITES:-fuzz_invariants contract_invariants user_journeys event_topics})
 OUT="${OUT:-${SL}/target/test-performance.json}"
 BASELINE="${BASELINE:-${SL}/benchmarks/test-performance-baseline.json}"
 SLOWDOWN_FACTOR="${SLOWDOWN_FACTOR:-2.0}"

@@ -31,7 +31,7 @@ export PROPTEST_CASES="${PROPTEST_CASES:-16}"
 declare -A SUITE_ARGS=(
     [test-utils]="-p test-utils"
     [common]="-p stellarlend-common --lib"
-    [lending-integration]="-p stellarlend-lending --test admin_config_auth --test config_auth --test incident_regressions --test event_topics --test protocol_formal_specs --test scenarios --test user_journeys --test fuzz_invariants --test supplier_rewards --test supply_caps"
+    [lending-integration]="-p stellarlend-lending --test admin_config_auth --test config_auth --test incident_regressions --test event_topics --test protocol_formal_specs --test scenarios --test user_journeys --test fuzz_invariants --test contract_invariants --test supplier_rewards --test supply_caps"
     [flash-loan-liquidation]="-p flash-loan-liquidation-tests"
 )
 SUITE_ORDER=(test-utils common lending-integration flash-loan-liquidation)

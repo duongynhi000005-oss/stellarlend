@@ -4,6 +4,7 @@ These suites build against the contract's public client (`LendingContractClient`
 
 | Suite | Issue | What it checks |
 |---|---|---|
+| `contract_invariants.rs` | #1361 | Property-based contract invariants for supply caps, liquidations, batch deposits, pauses, and multi-collateral positions |
 | `fuzz_invariants.rs` | #686 | Property-based fuzzing of deposit, withdraw, borrow, and repay, with invariants checked after every call |
 | `user_journeys.rs` | #693 | Full user journeys with Soroban gas metered per step and checked against `benchmarks/baseline.json` budgets |
 | `event_topics.rs` | #685 | The event layout the off-chain indexer depends on |
@@ -27,6 +28,19 @@ Run the suites directly:
 cd stellar-lend
 cargo test -p stellarlend-lending --test fuzz_invariants --test user_journeys --test event_topics
 ```
+
+## Contract invariants (#1361, `contract_invariants.rs`)
+
+Formally defines, fuzzes, and enforces protocol invariants for the lending contract:
+
+| ID | Name | Invariant |
+|---|---|---|
+| INV-01 | Supply Cap Invariant | For all assets $a$, $\text{total\_deposited}(a) \le \text{supply\_cap}(a)$ when cap is set; deposits exceeding the cap are rejected |
+| INV-02 | Liquidation Solvency & Conservation | Liquidation requires $HF < 1.0$; debt strictly decreases, collateral seized matches debt repaid + incentive, self-liquidation rejected |
+| INV-03 | Batch Deposit Atomicity | Batch deposits apply all entries atomically or revert completely with 0 state change on cap violation |
+| INV-04 | Subsystem Pause Safety | Paused operations (`Deposit`, `Borrow`, `Repay`, `Withdraw`, `Liquidation`) fail immediately without touching state |
+| INV-05 | Multi-Collateral Valuation | Reported collateral value equals $\sum_i \text{amount}_i \cdot \text{price}_i / 10^8$, capped at 8 distinct collateral assets |
+| INV-06 | Accounting Soundness | Non-negative balances for all users; debt-free users return health factor sentinel $100{,}000{,}000$ |
 
 ## Fuzzing and invariants (`fuzz_invariants.rs`)
 
