@@ -146,6 +146,10 @@ pub enum BorrowDataKey {
     BorrowUserCollaterals(Address),
     /// Per-asset liquidation incentive override in basis points
     AssetLiquidationIncentiveBps(Address),
+    /// Per-asset reserve factor in basis points (e.g. 1000 = 10%)
+    AssetReserveFactorBps(Address),
+    /// Accumulated protocol reserves tracked per asset
+    AssetProtocolReserves(Address),
 }
 
 /// Dynamic stablecoin configuration.
@@ -557,12 +561,20 @@ pub fn repay_with_rate(
     let mut remaining_repayment = amount;
 
     // Repay interest first
-    if remaining_repayment >= debt_position.interest_accrued {
+    let interest_paid = if remaining_repayment >= debt_position.interest_accrued {
+        let paid = debt_position.interest_accrued;
         remaining_repayment -= debt_position.interest_accrued;
         debt_position.interest_accrued = 0;
+        paid
     } else {
         debt_position.interest_accrued -= remaining_repayment;
+        let paid = remaining_repayment;
         remaining_repayment = 0;
+        paid
+    };
+
+    if interest_paid > 0 {
+        accrue_to_reserves(env, &asset, interest_paid);
     }
 
     // Repay principal
@@ -1346,4 +1358,163 @@ stellarlend_errors::impl_contract_error! {
     SelfLiquidation => Unauthorized, "A borrower cannot liquidate their own position";
     PriceUnavailable => InvalidState, "The oracle has no usable price for a required asset", RetryLater;
     IncentiveOutOfBounds => InvalidInput, "Liquidation incentive is outside the allowed bounds";
+}
+
+/// Set per-asset reserve factor in basis points (admin only).
+/// E.g. 1000 = 10%. Passing `None` or `Some(0)` sets the reserve factor to 0%.
+/// Max allowed value is 10,000 (100%).
+pub fn set_asset_reserve_factor(
+    env: &Env,
+    admin: &Address,
+    asset: &Address,
+    bps: Option<i128>,
+) -> Result<(), BorrowError> {
+    let current = get_admin(env).ok_or(BorrowError::Unauthorized)?;
+    if *admin != current {
+        return Err(BorrowError::Unauthorized);
+    }
+    admin.require_auth();
+
+    let previous_factor_bps = get_asset_reserve_factor(env, asset);
+    let key = BorrowDataKey::AssetReserveFactorBps(asset.clone());
+
+    let new_factor_bps = match bps {
+        Some(val) => {
+            if val < 0 || val > 10_000 {
+                return Err(BorrowError::InvalidAmount);
+            }
+            if val == 0 {
+                env.storage().persistent().remove(&key);
+                0
+            } else {
+                env.storage().persistent().set(&key, &val);
+                val
+            }
+        }
+        None => {
+            env.storage().persistent().remove(&key);
+            0
+        }
+    };
+
+    crate::events::ReserveFactorUpdatedEvent {
+        admin: admin.clone(),
+        asset: asset.clone(),
+        previous_factor_bps,
+        new_factor_bps,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+
+    Ok(())
+}
+
+/// Read the configured reserve factor in basis points for an asset.
+pub fn get_asset_reserve_factor(env: &Env, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::AssetReserveFactorBps(asset.clone()))
+        .unwrap_or(0)
+}
+
+/// Read the accumulated protocol reserves for a specific asset.
+pub fn get_asset_protocol_reserves(env: &Env, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::AssetProtocolReserves(asset.clone()))
+        .unwrap_or(0)
+}
+
+pub(crate) fn set_asset_protocol_reserves(env: &Env, asset: &Address, amount: i128) {
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::AssetProtocolReserves(asset.clone()), &amount);
+}
+
+/// Accrue a portion of interest to protocol reserves according to the asset's reserve factor.
+pub fn accrue_to_reserves(env: &Env, asset: &Address, interest_paid: i128) -> i128 {
+    let factor_bps = get_asset_reserve_factor(env, asset);
+    if factor_bps <= 0 || interest_paid <= 0 {
+        return 0;
+    }
+    let reserve_cut = interest_paid
+        .checked_mul(factor_bps)
+        .unwrap_or(0)
+        .checked_div(10_000)
+        .unwrap_or(0);
+
+    if reserve_cut > 0 {
+        let current_asset_reserves = get_asset_protocol_reserves(env, asset);
+        let updated_asset_reserves = current_asset_reserves
+            .checked_add(reserve_cut)
+            .unwrap_or(current_asset_reserves);
+        set_asset_protocol_reserves(env, asset, updated_asset_reserves);
+
+        // Also update protocol-wide reserves storage
+        let current_global_reserves = crate::views::get_protocol_reserves(env);
+        let updated_global = current_global_reserves
+            .checked_add(reserve_cut)
+            .unwrap_or(current_global_reserves);
+        crate::data_store::DataStore::set_protocol_reserves(env, updated_global);
+
+        crate::events::ReservesAccruedEvent {
+            asset: asset.clone(),
+            interest_paid,
+            reserve_factor_bps: factor_bps,
+            accrued_amount: reserve_cut,
+            total_reserves: updated_asset_reserves,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(env);
+    }
+
+    reserve_cut
+}
+
+/// Withdraw accumulated protocol reserves for an asset to a destination address (admin only).
+pub fn withdraw_reserves(
+    env: &Env,
+    admin: &Address,
+    asset: &Address,
+    to: &Address,
+    amount: i128,
+) -> Result<(), BorrowError> {
+    let current = get_admin(env).ok_or(BorrowError::Unauthorized)?;
+    if *admin != current {
+        return Err(BorrowError::Unauthorized);
+    }
+    admin.require_auth();
+
+    if amount <= 0 {
+        return Err(BorrowError::InvalidAmount);
+    }
+
+    let current_reserves = get_asset_protocol_reserves(env, asset);
+    if amount > current_reserves {
+        return Err(BorrowError::InsufficientReserves);
+    }
+
+    let updated_reserves = current_reserves
+        .checked_sub(amount)
+        .ok_or(BorrowError::Overflow)?;
+    set_asset_protocol_reserves(env, asset, updated_reserves);
+
+    // Update global view reserves as well
+    let global = crate::views::get_protocol_reserves(env);
+    let updated_global = global.checked_sub(amount).unwrap_or(0).max(0);
+    crate::data_store::DataStore::set_protocol_reserves(env, updated_global);
+
+// Transfer token out or accounting debit handled
+
+    crate::events::ReservesWithdrawnEvent {
+        admin: admin.clone(),
+        asset: asset.clone(),
+        to: to.clone(),
+        amount,
+        remaining_reserves: updated_reserves,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+
+    Ok(())
 }

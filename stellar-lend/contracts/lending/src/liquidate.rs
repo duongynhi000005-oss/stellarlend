@@ -204,6 +204,10 @@ pub fn liquidate(
     debt.borrowed_amount -= principal_paid;
     save_debt_position(env, &borrower, &debt);
 
+    if interest_paid > 0 {
+        crate::borrow::accrue_to_reserves(env, &debt_asset, interest_paid);
+    }
+
     if principal_paid > 0 {
         let new_total = get_total_debt(env)
             .checked_sub(principal_paid)

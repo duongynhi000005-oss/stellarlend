@@ -108,6 +108,44 @@ pub struct SupplyCapUpdatedEvent {
     pub timestamp: u64,
 }
 
+/// Event emitted when admin updates per-asset reserve factor.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReserveFactorUpdatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub asset: Address,
+    pub previous_factor_bps: i128,
+    pub new_factor_bps: i128,
+    pub timestamp: u64,
+}
+
+/// Event emitted when interest is accrued into protocol reserves upon repayment or liquidation.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReservesAccruedEvent {
+    #[topic]
+    pub asset: Address,
+    pub interest_paid: i128,
+    pub reserve_factor_bps: i128,
+    pub accrued_amount: i128,
+    pub total_reserves: i128,
+    pub timestamp: u64,
+}
+
+/// Event emitted when admin withdraws accumulated protocol reserves.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct ReservesWithdrawnEvent {
+    #[topic]
+    pub admin: Address,
+    pub asset: Address,
+    pub to: Address,
+    pub amount: i128,
+    pub remaining_reserves: i128,
+    pub timestamp: u64,
+}
+
 /// Withdraw / emergency-withdraw event (includes post-withdrawal balance).
 #[contractevent]
 #[derive(Clone, Debug)]

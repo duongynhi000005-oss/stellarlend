@@ -619,6 +619,37 @@ impl LendingContract {
     pub fn get_asset_total_supply(env: Env, asset: Address) -> i128 {
         get_asset_total_supply_logic(&env, &asset)
     }
+
+    /// Configure (`Some(bps)`) or clear (`None` / `Some(0)`) the reserve factor for an asset (admin only).
+    pub fn set_asset_reserve_factor(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        bps: Option<i128>,
+    ) -> Result<(), BorrowError> {
+        borrow::set_asset_reserve_factor(&env, &admin, &asset, bps)
+    }
+
+    /// Read the configured reserve factor in basis points for an asset.
+    pub fn get_asset_reserve_factor(env: Env, asset: Address) -> i128 {
+        borrow::get_asset_reserve_factor(&env, &asset)
+    }
+
+    /// Read the accumulated protocol reserves for a specific asset.
+    pub fn get_asset_protocol_reserves(env: Env, asset: Address) -> i128 {
+        borrow::get_asset_protocol_reserves(&env, &asset)
+    }
+
+    /// Withdraw accumulated protocol reserves for an asset to a destination address (admin only).
+    pub fn withdraw_reserves(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        to: Address,
+        amount: i128,
+    ) -> Result<(), BorrowError> {
+        borrow::withdraw_reserves(&env, &admin, &asset, &to, amount)
+    }
     // ═══════════════════════════════════════════════════════════════════
     // Compressed calldata (#1045)
     // ═══════════════════════════════════════════════════════════════════
