@@ -66,6 +66,8 @@ pub enum BorrowError {
     PriceUnavailable = 16,
     /// Liquidation incentive is outside the allowed bounds
     IncentiveOutOfBounds = 17,
+    /// Total borrowed amount for this asset would exceed the configured borrow cap
+    ExceedsBorrowCap = 18,
 }
 
 /// Borrow on behalf of a user when authorization is provided via a trusted delegate.
@@ -146,6 +148,10 @@ pub enum BorrowDataKey {
     BorrowUserCollaterals(Address),
     /// Per-asset liquidation incentive override in basis points
     AssetLiquidationIncentiveBps(Address),
+    /// Per-asset borrow cap configured by the admin.
+    AssetBorrowCap(Address),
+    /// Aggregate borrowed amount tracked per asset.
+    AssetTotalBorrowed(Address),
 }
 
 /// Dynamic stablecoin configuration.
@@ -440,6 +446,17 @@ fn borrow_inner(
         return Err(BorrowError::DebtCeilingReached);
     }
 
+    let asset_total = get_asset_total_borrowed(env, &asset);
+    let new_asset_total = asset_total
+        .checked_add(amount)
+        .ok_or(BorrowError::Overflow)?;
+
+    if let Some(asset_cap) = get_asset_borrow_cap(env, &asset) {
+        if new_asset_total > asset_cap {
+            return Err(BorrowError::ExceedsBorrowCap);
+        }
+    }
+
     crate::utilization_breaker::check_borrow(env, amount, new_total, limits.debt_ceiling)?;
 
     let mut debt_position = get_debt_position(env, &user, Some(&asset), rate_type);
@@ -464,6 +481,7 @@ fn borrow_inner(
     save_debt_position(env, &user, &debt_position);
     add_collateral(env, &user, &collateral_asset, collateral_amount)?;
     set_total_debt(env, new_total);
+    set_asset_total_borrowed(env, &asset, new_asset_total);
 
     // Lazy pool state (#1046): the borrow-index snapshot is only materialised
     // by the pool's first borrow, never at pool creation.
@@ -579,6 +597,7 @@ pub fn repay_with_rate(
             .ok_or(BorrowError::Overflow)?;
         set_total_debt(env, new_total);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
+        decrease_asset_total_borrowed(env, &asset, remaining_repayment);
     }
 
     save_debt_position(env, &user, &debt_position);
@@ -1019,6 +1038,7 @@ pub fn sweep_debt_dust(env: &Env, user: Address, asset: Address) -> Result<i128,
         let new_total = total_debt.checked_sub(swept).ok_or(BorrowError::Overflow)?;
         set_total_debt(env, new_total);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
+        decrease_asset_total_borrowed(env, &debt_position.asset, swept);
 
         return Ok(swept);
     }
@@ -1325,6 +1345,71 @@ pub fn get_stablecoin_config(env: &Env, asset: &Address) -> Option<StablecoinCon
         .get(&BorrowDataKey::AssetStablecoinConfig(asset.clone()))
 }
 
+/// Configure (`Some(cap)`) or clear (`None`) the borrow cap for a specific asset (admin only).
+pub fn set_asset_borrow_cap(
+    env: &Env,
+    admin: &Address,
+    asset: &Address,
+    cap: Option<i128>,
+) -> Result<(), BorrowError> {
+    require_admin(env, admin)?;
+
+    let previous_cap = get_asset_borrow_cap(env, asset).unwrap_or(0);
+    let key = BorrowDataKey::AssetBorrowCap(asset.clone());
+
+    let new_cap = match cap {
+        Some(value) => {
+            if value <= 0 {
+                return Err(BorrowError::InvalidAmount);
+            }
+            env.storage().persistent().set(&key, &value);
+            value
+        }
+        None => {
+            env.storage().persistent().remove(&key);
+            0
+        }
+    };
+
+    crate::events::BorrowCapUpdatedEvent {
+        admin: admin.clone(),
+        asset: asset.clone(),
+        previous_cap,
+        new_cap,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+
+    Ok(())
+}
+
+/// Read the configured borrow cap for `asset`, or `None` if uncapped at the asset level.
+pub fn get_asset_borrow_cap(env: &Env, asset: &Address) -> Option<i128> {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::AssetBorrowCap(asset.clone()))
+}
+
+/// Read the aggregate borrowed amount currently outstanding for `asset`.
+pub fn get_asset_total_borrowed(env: &Env, asset: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::AssetTotalBorrowed(asset.clone()))
+        .unwrap_or(0)
+}
+
+pub(crate) fn set_asset_total_borrowed(env: &Env, asset: &Address, total: i128) {
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::AssetTotalBorrowed(asset.clone()), &total);
+}
+
+pub(crate) fn decrease_asset_total_borrowed(env: &Env, asset: &Address, amount: i128) {
+    let current = get_asset_total_borrowed(env, asset);
+    let updated = current.checked_sub(amount).unwrap_or(0).max(0);
+    set_asset_total_borrowed(env, asset, updated);
+}
+
 // Unified error registry: protocol-wide global codes, messages and recovery
 // suggestions for every variant (see `stellarlend_errors` and docs/ERROR_HANDLING.md).
 stellarlend_errors::impl_contract_error! {
@@ -1346,4 +1431,5 @@ stellarlend_errors::impl_contract_error! {
     SelfLiquidation => Unauthorized, "A borrower cannot liquidate their own position";
     PriceUnavailable => InvalidState, "The oracle has no usable price for a required asset", RetryLater;
     IncentiveOutOfBounds => InvalidInput, "Liquidation incentive is outside the allowed bounds";
+    ExceedsBorrowCap => LimitExceeded, "Total borrowed amount for this asset would exceed the configured borrow cap", ReduceAmount;
 }

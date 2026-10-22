@@ -48,10 +48,12 @@ mod state_machine;
 
 use borrow::{
     borrow as borrow_cmd, borrow_with_rate as borrow_with_rate_logic, deposit as borrow_deposit,
-    get_admin as get_borrow_admin, get_user_collateral as get_borrow_collateral,
+    get_admin as get_borrow_admin, get_asset_borrow_cap as get_asset_borrow_cap_logic,
+    get_asset_total_borrowed as get_asset_total_borrowed_logic,
+    get_user_collateral as get_borrow_collateral,
     get_user_debt as get_borrow_debt, get_user_debt_with_rate as get_borrow_debt_with_rate,
     initialize_borrow_settings as initialize_borrow_logic, repay as borrow_repay,
-    set_admin as set_borrow_admin,
+    set_admin as set_borrow_admin, set_asset_borrow_cap as set_asset_borrow_cap_logic,
     set_liquidation_threshold_bps as set_liquidation_threshold_logic,
     set_oracle as set_oracle_logic, set_variable_borrow_rate_bps as set_variable_borrow_rate_logic,
     sweep_debt_dust as borrow_sweep_debt_dust, switch_rate_type as switch_rate_type_logic,
@@ -618,6 +620,26 @@ impl LendingContract {
     /// Read the aggregate supplied amount currently held for `asset`.
     pub fn get_asset_total_supply(env: Env, asset: Address) -> i128 {
         get_asset_total_supply_logic(&env, &asset)
+    }
+
+    /// Configure (`Some(cap)`) or clear (`None`) the borrow cap for a specific asset (admin only).
+    pub fn set_asset_borrow_cap(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        cap: Option<i128>,
+    ) -> Result<(), BorrowError> {
+        set_asset_borrow_cap_logic(&env, &admin, &asset, cap)
+    }
+
+    /// Read the configured per-asset borrow cap for `asset` (`None` when uncapped at the asset level).
+    pub fn get_asset_borrow_cap(env: Env, asset: Address) -> Option<i128> {
+        get_asset_borrow_cap_logic(&env, &asset)
+    }
+
+    /// Read the aggregate borrowed amount currently outstanding for `asset`.
+    pub fn get_asset_total_borrowed(env: Env, asset: Address) -> i128 {
+        get_asset_total_borrowed_logic(&env, &asset)
     }
     // ═══════════════════════════════════════════════════════════════════
     // Compressed calldata (#1045)

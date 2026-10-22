@@ -32,9 +32,9 @@ use soroban_sdk::{contracttype, Address, Env, Map, I256};
 
 use crate::borrow::{
     add_collateral, calculate_interest, debit_collateral_balances,
-    get_asset_liquidation_incentive_bps, get_close_factor_bps, get_collateral_balances,
-    get_debt_ceiling, get_debt_position, get_oracle, get_total_debt, save_debt_position,
-    set_total_debt, BorrowError, RateType,
+    decrease_asset_total_borrowed, get_asset_liquidation_incentive_bps, get_close_factor_bps,
+    get_collateral_balances, get_debt_ceiling, get_debt_position, get_oracle, get_total_debt,
+    save_debt_position, set_total_debt, BorrowError, RateType,
 };
 use crate::events::LiquidationEvent;
 use crate::reentrancy::ReentrancyGuard;
@@ -210,6 +210,7 @@ pub fn liquidate(
             .ok_or(BorrowError::Overflow)?;
         set_total_debt(env, new_total);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
+        decrease_asset_total_borrowed(env, &debt_asset, principal_paid);
     }
 
     debit_collateral_balances(env, &borrower, &mut balances, &collateral_asset, seize)?;

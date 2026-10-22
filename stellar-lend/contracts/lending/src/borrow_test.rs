@@ -416,3 +416,34 @@ fn test_repay_over_amount() {
     let repay_result = client.try_repay(&user, &asset, &15_000);
     assert_eq!(repay_result, Err(Ok(BorrowError::RepayAmountTooHigh)));
 }
+
+#[test]
+fn test_per_asset_borrow_cap_configurable_and_enforced() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, user, asset_a, collateral_asset) = setup_test(&env);
+    let asset_b = Address::generate(&env);
+
+    client.set_asset_borrow_cap(&admin, &asset_a, &Some(20_000));
+    assert_eq!(client.get_asset_borrow_cap(&asset_a), Some(20_000));
+    assert_eq!(client.get_asset_borrow_cap(&asset_b), None);
+
+    // Borrow up to 20_000 succeeds
+    client.borrow(&user, &asset_a, &20_000, &collateral_asset, &40_000);
+    assert_eq!(client.get_asset_total_borrowed(&asset_a), 20_000);
+
+    // Exceeding the cap fails with ExceedsBorrowCap
+    let over = client.try_borrow(&user, &asset_a, &1_000, &collateral_asset, &2_000);
+    assert_eq!(over, Err(Ok(BorrowError::ExceedsBorrowCap)));
+
+    // Uncapped asset B still permits borrows
+    client.borrow(&user, &asset_b, &15_000, &collateral_asset, &30_000);
+    assert_eq!(client.get_asset_total_borrowed(&asset_b), 15_000);
+
+    // Raising the cap permits further borrowing
+    client.set_asset_borrow_cap(&admin, &asset_a, &Some(30_000));
+    assert_eq!(client.get_asset_borrow_cap(&asset_a), Some(30_000));
+    client.borrow(&user, &asset_a, &5_000, &collateral_asset, &10_000);
+    assert_eq!(client.get_asset_total_borrowed(&asset_a), 25_000);
+}
