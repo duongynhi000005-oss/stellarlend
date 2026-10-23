@@ -108,6 +108,30 @@ pub struct SupplyCapUpdatedEvent {
     pub timestamp: u64,
 }
 
+/// Asset assigned to or migrated between risk pools (0 = shared core pool, >0 = isolated pool).
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct AssetPoolUpdatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub asset: Address,
+    pub previous_pool_id: u32,
+    pub new_pool_id: u32,
+    pub timestamp: u64,
+}
+
+/// Debt ceiling updated for an isolated risk pool.
+#[contractevent]
+#[derive(Clone, Debug)]
+pub struct PoolDebtCeilingUpdatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub pool_id: u32,
+    pub previous_ceiling: i128,
+    pub new_ceiling: i128,
+    pub timestamp: u64,
+}
+
 /// Withdraw / emergency-withdraw event (includes post-withdrawal balance).
 #[contractevent]
 #[derive(Clone, Debug)]

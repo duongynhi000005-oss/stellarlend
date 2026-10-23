@@ -76,17 +76,21 @@ fn mul_div(env: &Env, a: i128, b: i128, c: i128) -> Result<i128, BorrowError> {
         .ok_or(BorrowError::Overflow)
 }
 
-/// Value of every asset in `balances`. Fails on any asset the oracle cannot
-/// price.
-fn strict_collateral_value(
+/// Value of every asset in `balances` that belongs to `pool_id`. Fails on any asset
+/// the oracle cannot price. Assets outside `pool_id` are strictly excluded from
+/// backing debt in `pool_id`.
+fn strict_collateral_value_in_pool(
     env: &Env,
     oracle: &Address,
     balances: &Map<Address, i128>,
+    pool_id: u32,
 ) -> Result<i128, BorrowError> {
     let mut total: i128 = 0;
     for (asset, amount) in balances.iter() {
-        let value = mul_div(env, amount, price(env, oracle, &asset)?, PRICE_SCALE)?;
-        total = total.checked_add(value).ok_or(BorrowError::Overflow)?;
+        if crate::borrow::get_asset_pool(env, &asset) == pool_id {
+            let value = mul_div(env, amount, price(env, oracle, &asset)?, PRICE_SCALE)?;
+            total = total.checked_add(value).ok_or(BorrowError::Overflow)?;
+        }
     }
     Ok(total)
 }
@@ -126,6 +130,12 @@ pub fn liquidate(
         return Err(BorrowError::AssetNotSupported);
     }
 
+    let debt_pool = crate::borrow::get_asset_pool(env, &debt_asset);
+    let collateral_pool = crate::borrow::get_asset_pool(env, &collateral_asset);
+    if debt_pool != collateral_pool {
+        return Err(BorrowError::IsolatedPoolMismatch);
+    }
+
     // One read of the collateral record serves the health check, the
     // availability check and the seizure below.
     let mut balances = get_collateral_balances(env, &borrower);
@@ -134,10 +144,9 @@ pub fn liquidate(
     // reported after the health and availability checks, as it always was.
     let accrued = calculate_interest(env, &debt);
 
-    // Health factor over the whole position, matching `get_health_factor`. The
-    // debt side is the view `get_user_debt` reports: it saturates on overflow
-    // and ignores any other interest error.
-    let collateral_value = strict_collateral_value(env, &oracle, &balances)?;
+    // Health factor over the position scoped to the debt's risk pool.
+    // Collateral outside debt_pool cannot protect debt in debt_pool.
+    let collateral_value = strict_collateral_value_in_pool(env, &oracle, &balances, debt_pool)?;
     let mut debt_view = debt.clone();
     match accrued {
         Ok(interest) => {
@@ -210,6 +219,8 @@ pub fn liquidate(
             .ok_or(BorrowError::Overflow)?;
         set_total_debt(env, new_total);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
+        let debt_pool = crate::borrow::get_asset_pool(env, &debt_asset);
+        crate::borrow::decrement_pool_total_debt(env, debt_pool, principal_paid);
     }
 
     debit_collateral_balances(env, &borrower, &mut balances, &collateral_asset, seize)?;

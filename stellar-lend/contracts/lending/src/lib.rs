@@ -73,21 +73,21 @@ pub use deposit::{DepositCollateral, DepositError};
 use deposit_batch::deposit_batch as deposit_batch_logic;
 pub use deposit_batch::{BatchDepositResult, DepositRequest, MAX_BATCH_DEPOSITS};
 use flash_loan::{
-    flash_loan as flash_loan_logic, set_flash_loan_fee_bps as set_flash_loan_fee_logic,
-    get_flash_loan_fee_bps as get_flash_loan_fee_bps_logic,
-    set_flash_loan_security_config as set_flash_loan_security_config_logic,
+    flash_loan as flash_loan_logic, get_flash_loan_fee_bps as get_flash_loan_fee_bps_logic,
     get_flash_loan_security_config as get_flash_loan_security_config_logic,
     get_flash_loan_security_snapshot as get_flash_loan_security_snapshot_logic,
     is_asset_flash_loan_active as is_asset_flash_loan_active_logic,
-    FlashLoanError, FlashLoanSecurityConfig, FlashLoanSecuritySnapshot,
+    set_flash_loan_fee_bps as set_flash_loan_fee_logic,
+    set_flash_loan_security_config as set_flash_loan_security_config_logic, FlashLoanError,
+    FlashLoanSecurityConfig, FlashLoanSecuritySnapshot,
 };
 pub use interest_rate::{InterestRateConfig, InterestRateConfigUpdate};
 use lazy::{LazyField, PoolStateView};
 pub use liquidate::LiquidationResult;
-use pause::{is_paused, set_pause as set_pause_logic};
 /// Re-exported so integrators (and the `tests/` suites) can build `set_pause`
 /// and `guardian_pause` arguments.
 pub use pause::PauseType;
+use pause::{is_paused, set_pause as set_pause_logic};
 use reentrancy::ReentrancyGuard;
 use token_receiver::receive as receive_logic;
 use utilization_breaker::{
@@ -144,6 +144,8 @@ mod insurance_test;
 #[cfg(test)]
 mod invariant_prop_test;
 #[cfg(test)]
+mod liquidation_boundary_test;
+#[cfg(test)]
 mod math_safety_test;
 #[cfg(test)]
 mod pause_test;
@@ -159,8 +161,6 @@ mod utilization_breaker_test;
 mod views_test;
 #[cfg(test)]
 mod withdraw_test;
-#[cfg(test)]
-mod liquidation_boundary_test;
 
 #[contract]
 pub struct LendingContract;
@@ -199,10 +199,7 @@ impl LendingContract {
 
     /// Claim vested tokens to the authorizing supplier, including after withdrawal
     /// or disabling new allocations. A repeated claim returns zero.
-    pub fn claim_supplier_rewards(
-        env: Env,
-        user: Address,
-    ) -> Result<i128, SupplierRewardsError> {
+    pub fn claim_supplier_rewards(env: Env, user: Address) -> Result<i128, SupplierRewardsError> {
         supplier_rewards::claim(&env, user)
     }
 
@@ -339,11 +336,7 @@ impl LendingContract {
     /// This is the emergency control surface. It is restricted to the
     /// configured admin and delegates to the same guarded pause storage used
     /// by the granular operation controls.
-    pub fn emergency_pause(
-        env: Env,
-        admin: Address,
-        paused: bool,
-    ) -> Result<(), BorrowError> {
+    pub fn emergency_pause(env: Env, admin: Address, paused: bool) -> Result<(), BorrowError> {
         Self::set_pause(env, admin, PauseType::All, paused)
     }
 
@@ -482,6 +475,46 @@ impl LendingContract {
     /// Returns health factor (scaled 10000 = 1.0). Above 10000 = healthy; below = liquidatable.
     pub fn get_health_factor(env: Env, user: Address) -> i128 {
         view_health_factor(&env, &user)
+    }
+
+    /// Configure the risk pool an asset belongs to (0 = shared core pool, >0 = isolated pool).
+    pub fn set_asset_pool(
+        env: Env,
+        admin: Address,
+        asset: Address,
+        pool_id: u32,
+    ) -> Result<(), BorrowError> {
+        borrow::set_asset_pool(&env, &admin, &asset, pool_id)
+    }
+
+    /// Query the risk pool an asset belongs to.
+    pub fn get_asset_pool(env: Env, asset: Address) -> u32 {
+        borrow::get_asset_pool(&env, &asset)
+    }
+
+    /// Set an aggregate debt ceiling for an isolated risk pool.
+    pub fn set_pool_debt_ceiling(
+        env: Env,
+        admin: Address,
+        pool_id: u32,
+        ceiling: i128,
+    ) -> Result<(), BorrowError> {
+        borrow::set_pool_debt_ceiling(&env, &admin, pool_id, ceiling)
+    }
+
+    /// Query the aggregate debt ceiling for an isolated risk pool.
+    pub fn get_pool_debt_ceiling(env: Env, pool_id: u32) -> i128 {
+        borrow::get_pool_debt_ceiling(&env, pool_id)
+    }
+
+    /// Query the current total active debt in an isolated risk pool.
+    pub fn get_pool_total_debt(env: Env, pool_id: u32) -> i128 {
+        borrow::get_pool_total_debt(&env, pool_id)
+    }
+
+    /// Returns health factor scoped to a specific risk pool.
+    pub fn get_pool_health_factor(env: Env, user: Address, pool_id: u32) -> i128 {
+        views::get_pool_health_factor(&env, &user, pool_id)
     }
 
     /// Returns full position summary: collateral/debt balances and values, and health factor.

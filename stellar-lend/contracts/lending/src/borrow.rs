@@ -66,6 +66,8 @@ pub enum BorrowError {
     PriceUnavailable = 16,
     /// Liquidation incentive is outside the allowed bounds
     IncentiveOutOfBounds = 17,
+    /// Operation violates isolated risk pool boundaries (collateral and debt must belong to the same pool)
+    IsolatedPoolMismatch = 18,
 }
 
 /// Borrow on behalf of a user when authorization is provided via a trusted delegate.
@@ -146,6 +148,12 @@ pub enum BorrowDataKey {
     BorrowUserCollaterals(Address),
     /// Per-asset liquidation incentive override in basis points
     AssetLiquidationIncentiveBps(Address),
+    /// Risk pool ID an asset is assigned to (0 = shared core pool, >0 = isolated pool)
+    AssetPool(Address),
+    /// Configured aggregate debt ceiling for an isolated risk pool ID
+    PoolDebtCeiling(u32),
+    /// Aggregate active debt tracked within an isolated risk pool ID
+    PoolTotalDebt(u32),
 }
 
 /// Dynamic stablecoin configuration.
@@ -431,6 +439,24 @@ fn borrow_inner(
 
     validate_collateral_ratio(collateral_amount, amount)?;
 
+    let debt_pool = get_asset_pool(env, &asset);
+    let collateral_pool = get_asset_pool(env, &collateral_asset);
+    if debt_pool != collateral_pool {
+        return Err(BorrowError::IsolatedPoolMismatch);
+    }
+
+    if debt_pool > 0 {
+        let pool_ceiling = get_pool_debt_ceiling(env, debt_pool);
+        let pool_total = get_pool_total_debt(env, debt_pool);
+        let new_pool_total = pool_total
+            .checked_add(amount)
+            .ok_or(BorrowError::Overflow)?;
+        if pool_ceiling > 0 && new_pool_total > pool_ceiling {
+            return Err(BorrowError::DebtCeilingReached);
+        }
+        set_pool_total_debt(env, debt_pool, new_pool_total);
+    }
+
     let total_debt = get_total_debt(env);
     let new_total = total_debt
         .checked_add(amount)
@@ -578,6 +604,9 @@ pub fn repay_with_rate(
             .checked_sub(remaining_repayment)
             .ok_or(BorrowError::Overflow)?;
         set_total_debt(env, new_total);
+
+        let debt_pool = get_asset_pool(env, &asset);
+        decrement_pool_total_debt(env, debt_pool, remaining_repayment);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
     }
 
@@ -1020,6 +1049,9 @@ pub fn sweep_debt_dust(env: &Env, user: Address, asset: Address) -> Result<i128,
         set_total_debt(env, new_total);
         crate::utilization_breaker::on_debt_changed(env, new_total, get_debt_ceiling(env));
 
+        let debt_pool = get_asset_pool(env, &asset);
+        decrement_pool_total_debt(env, debt_pool, swept);
+
         return Ok(swept);
     }
 
@@ -1325,6 +1357,95 @@ pub fn get_stablecoin_config(env: &Env, asset: &Address) -> Option<StablecoinCon
         .get(&BorrowDataKey::AssetStablecoinConfig(asset.clone()))
 }
 
+/// Query the risk pool an asset belongs to (0 = default shared pool).
+pub fn get_asset_pool(env: &Env, asset: &Address) -> u32 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::AssetPool(asset.clone()))
+        .unwrap_or(0)
+}
+
+/// Set the risk pool an asset belongs to (admin only).
+pub fn set_asset_pool(
+    env: &Env,
+    admin: &Address,
+    asset: &Address,
+    pool_id: u32,
+) -> Result<(), BorrowError> {
+    require_admin(env, admin)?;
+    let previous = get_asset_pool(env, asset);
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::AssetPool(asset.clone()), &pool_id);
+
+    crate::events::AssetPoolUpdatedEvent {
+        admin: admin.clone(),
+        asset: asset.clone(),
+        previous_pool_id: previous,
+        new_pool_id: pool_id,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+    Ok(())
+}
+
+/// Query the debt ceiling for an isolated risk pool (0 = uncapped).
+pub fn get_pool_debt_ceiling(env: &Env, pool_id: u32) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::PoolDebtCeiling(pool_id))
+        .unwrap_or(0)
+}
+
+/// Set the aggregate debt ceiling for an isolated risk pool (admin only).
+pub fn set_pool_debt_ceiling(
+    env: &Env,
+    admin: &Address,
+    pool_id: u32,
+    ceiling: i128,
+) -> Result<(), BorrowError> {
+    require_admin(env, admin)?;
+    if ceiling < 0 {
+        return Err(BorrowError::InvalidAmount);
+    }
+    let previous = get_pool_debt_ceiling(env, pool_id);
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::PoolDebtCeiling(pool_id), &ceiling);
+
+    crate::events::PoolDebtCeilingUpdatedEvent {
+        admin: admin.clone(),
+        pool_id,
+        previous_ceiling: previous,
+        new_ceiling: ceiling,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
+    Ok(())
+}
+
+/// Query current total active debt in an isolated pool.
+pub fn get_pool_total_debt(env: &Env, pool_id: u32) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&BorrowDataKey::PoolTotalDebt(pool_id))
+        .unwrap_or(0)
+}
+
+pub(crate) fn set_pool_total_debt(env: &Env, pool_id: u32, total: i128) {
+    env.storage()
+        .persistent()
+        .set(&BorrowDataKey::PoolTotalDebt(pool_id), &total);
+}
+
+pub(crate) fn decrement_pool_total_debt(env: &Env, pool_id: u32, amount: i128) {
+    if pool_id > 0 && amount > 0 {
+        let current = get_pool_total_debt(env, pool_id);
+        let updated = current.saturating_sub(amount);
+        set_pool_total_debt(env, pool_id, updated);
+    }
+}
+
 // Unified error registry: protocol-wide global codes, messages and recovery
 // suggestions for every variant (see `stellarlend_errors` and docs/ERROR_HANDLING.md).
 stellarlend_errors::impl_contract_error! {
@@ -1346,4 +1467,5 @@ stellarlend_errors::impl_contract_error! {
     SelfLiquidation => Unauthorized, "A borrower cannot liquidate their own position";
     PriceUnavailable => InvalidState, "The oracle has no usable price for a required asset", RetryLater;
     IncentiveOutOfBounds => InvalidInput, "Liquidation incentive is outside the allowed bounds";
+    IsolatedPoolMismatch => GuaranteeViolated, "Operation violates isolated risk pool boundaries", UseSupportedAsset;
 }

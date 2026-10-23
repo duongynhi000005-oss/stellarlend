@@ -269,6 +269,51 @@ pub fn get_health_factor(env: &Env, user: &Address) -> i128 {
     compute_health_factor(env, cv, dv, debt_balance > 0)
 }
 
+/// Returns collateral value belonging to a specific risk pool.
+pub fn pool_collateral_value(env: &Env, user: &Address, pool_id: u32) -> i128 {
+    let Some(oracle) = get_oracle(env) else {
+        return 0;
+    };
+    let balances = get_collateral_balances(env, user);
+    let mut total: i128 = 0;
+    for (asset, amount) in balances.iter() {
+        if crate::borrow::get_asset_pool(env, &asset) == pool_id {
+            let price = get_asset_price(env, &oracle, &asset);
+            if price > 0 {
+                let amount_256 = I256::from_i128(env, amount);
+                let price_256 = I256::from_i128(env, price);
+                let scale_256 = I256::from_i128(env, PRICE_SCALE);
+                let val = amount_256
+                    .mul(&price_256)
+                    .div(&scale_256)
+                    .to_i128()
+                    .unwrap_or(0);
+                total = total.saturating_add(val);
+            }
+        }
+    }
+    total
+}
+
+/// Returns the user's health factor for a specific risk pool.
+pub fn get_pool_health_factor(env: &Env, user: &Address, pool_id: u32) -> i128 {
+    let position = get_user_debt(env, user);
+    let debt_balance = position
+        .borrowed_amount
+        .checked_add(position.interest_accrued)
+        .unwrap_or(0);
+    if debt_balance <= 0 {
+        return HEALTH_FACTOR_NO_DEBT;
+    }
+    let debt_pool = crate::borrow::get_asset_pool(env, &position.asset);
+    if debt_pool != pool_id {
+        return HEALTH_FACTOR_NO_DEBT;
+    }
+    let cv = pool_collateral_value(env, user, pool_id);
+    let dv = debt_value(env, &position);
+    compute_health_factor(env, cv, dv, true)
+}
+
 /// Returns the maximum debt amount that can be liquidated for `user` in one call.
 ///
 /// Returns 0 when:
